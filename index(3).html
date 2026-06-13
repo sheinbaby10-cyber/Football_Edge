@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Football Edge</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet"/>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#0a0e1a;color:#e2e8f0;font-family:'Inter',sans-serif;min-height:100vh}
+    ::-webkit-scrollbar{width:6px}
+    ::-webkit-scrollbar-thumb{background:#2d3748;border-radius:3px}
+    .spin{animation:spin 1s linear infinite}
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useCallback } = React;
+const SPORT = "soccer_epl";
+
+// ── Poisson model ─────────────────────────────────────────
+function poissonPMF(lam, k) {
+  let lp = -lam + k * Math.log(Math.max(lam, 1e-9));
+  for (let i = 2; i <= k; i++) lp -= Math.log(i);
+  return Math.exp(lp);
+}
+function buildMatrix(lh, la, max=8) {
+  const M = [];
+  for (let i=0;i<=max;i++){M[i]=[];for(let j=0;j<=max;j++)M[i][j]=poissonPMF(lh,i)*poissonPMF(la,j);}
+  return M;
+}
+function matrixProbs(M) {
+  let home=0,draw=0,away=0,over=0,btts=0;
+  for(let i=0;i<M.length;i++)for(let j=0;j<M[i].length;j++){
+    const p=M[i][j];
+    if(i>j)home+=p;else if(i===j)draw+=p;else away+=p;
+    if(i+j>2.5)over+=p;
+    if(i>0&&j>0)btts+=p;
+  }
+  return{home,draw,away,over25:over,under25:1-over,bttsYes:btts,bttsNo:1-btts};
+}
+
+// ── Derive lambdas from 1X2 odds ─────────────────────────
+function fairProbs(oh,od,oa){const v=1/oh+1/od+1/oa;return{ph:1/oh/v,pd:1/od/v,pa:1/oa/v};}
+function poissonHDA(lh,la){
+  let h=0,d=0,a=0;
+  for(let i=0;i<=10;i++)for(let j=0;j<=10;j++){
+    const p=poissonPMF(lh,i)*poissonPMF(la,j);
+    if(i>j)h+=p;else if(i===j)d+=p;else a+=p;
+  }
+  return{h,d,a};
+}
+function deriveLambdas(oh,od,oa){
+  const t=fairProbs(oh,od,oa);
+  let best={lh:1.4,la:1.1,err:Infinity};
+  for(let lh=0.5;lh<=4.0;lh+=0.08)for(let la=0.4;la<=3.0;la+=0.08){
+    const p=poissonHDA(lh,la);
+    const e=(p.h-t.ph)**2+(p.d-t.pd)**2+(p.a-t.pa)**2;
+    if(e<best.err)best={lh,la,err:e};
+  }
+  return{lambdaHome:best.lh,lambdaAway:best.la};
+}
+
+// ── EV & colours ─────────────────────────────────────────
+const ev=(p,o)=>p*o-1;
+const evCol=e=>e>=0.08?"#00e676":e>=0.03?"#69f0ae":e>0?"#b9f6ca":"#ef5350";
+const evTag=e=>e>=0.08?"🔥 STRONG VALUE":e>=0.03?"✅ VALUE":e>0?"⚠️ EDGE":"❌ NO VALUE";
+
+// ── ProbBar ───────────────────────────────────────────────
+function ProbBar({prob}){
+  const pct=Math.round(prob*100);
+  const col=pct>55?"#4fc3f7":pct>38?"#81d4fa":"#b0bec5";
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:8}}>
+      <div style={{flex:1,background:"#1a2035",borderRadius:4,height:8}}>
+        <div style={{width:`${pct}%`,background:col,height:"100%",borderRadius:4,transition:"width .6s"}}/>
+      </div>
+      <span style={{fontSize:13,fontWeight:600,minWidth:36}}>{pct}%</span>
+    </div>
+  );
+}
+
+// ── FixtureCard ───────────────────────────────────────────
+function FixtureCard({fixture,onAnalyse,result}){
+  const ko=new Date(fixture.commence_time);
+  const time=ko.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"});
+  const date=ko.toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short"});
+
+  return(
+    <div style={{background:"#111827",border:"1px solid #1f2937",borderRadius:16,padding:"20px 24px",marginBottom:16}}>
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+        <div>
+          <div style={{fontSize:11,color:"#6b7280",textTransform:"uppercase",letterSpacing:1,marginBottom:4}}>
+            Premier League · {date} · {time}
+          </div>
+          <div style={{fontSize:20,fontWeight:700}}>
+            {fixture.home_team} <span style={{color:"#374151"}}>vs</span> {fixture.away_team}
+          </div>
+        </div>
+        <button onClick={()=>onAnalyse(fixture)} disabled={result?.loading} style={{
+          background:result?"#1f2937":"linear-gradient(135deg,#6366f1,#8b5cf6)",
+          color:"#fff",border:"none",borderRadius:10,padding:"10px 20px",
+          fontSize:13,fontWeight:600,cursor:result?.loading?"wait":"pointer",whiteSpace:"nowrap"
+        }}>
+          {result?.loading?"Analysing…":result?"Re-analyse ⚡":"Analyse ⚡"}
+        </button>
+      </div>
+
+      {/* Odds pills */}
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:result?20:0}}>
+        {[["Home",fixture.odds?.home],["Draw",fixture.odds?.draw],["Away",fixture.odds?.away],
+          ["O2.5",fixture.odds?.over25],["U2.5",fixture.odds?.under25]]
+          .filter(([,o])=>o).map(([label,odds])=>(
+          <div key={label} style={{background:"#1a2035",borderRadius:8,padding:"6px 12px",fontSize:12,textAlign:"center"}}>
+            <div style={{color:"#6b7280",marginBottom:2}}>{label}</div>
+            <div style={{fontWeight:700}}>{odds.toFixed(2)}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Result */}
+      {result&&!result.loading&&!result.error&&(
+        <div style={{borderTop:"1px solid #1f2937",paddingTop:20}}>
+          {/* xG */}
+          <div style={{display:"flex",background:"#0d1117",borderRadius:10,overflow:"hidden",marginBottom:20}}>
+            <div style={{flex:1,padding:"14px 0",textAlign:"center"}}>
+              <div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>HOME xG</div>
+              <div style={{fontSize:28,fontWeight:800,color:"#4fc3f7"}}>{result.lambdaHome.toFixed(2)}</div>
+            </div>
+            <div style={{width:1,background:"#1f2937"}}/>
+            <div style={{flex:1,padding:"14px 0",textAlign:"center"}}>
+              <div style={{fontSize:11,color:"#6b7280",marginBottom:4}}>AWAY xG</div>
+              <div style={{fontSize:28,fontWeight:800,color:"#f48fb1"}}>{result.lambdaAway.toFixed(2)}</div>
+            </div>
+            <div style={{width:1,background:"#1f2937"}}/>
+            <div style={{flex:2,padding:"14px 20px",display:"flex",alignItems:"center"}}>
+              <div style={{fontSize:12,color:"#9ca3af",lineHeight:1.6}}>
+                Expected goals derived from market odds via Poisson calibration. Model identifies fair value vs bookmaker margin.
+              </div>
+            </div>
+          </div>
+
+          {/* Markets */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(190px,1fr))",gap:10}}>
+            {result.markets.map(m=>(
+              <div key={m.key} style={{background:"#0d1117",borderRadius:10,padding:"14px 16px",
+                border:`1px solid ${m.ev>=0.03?"#065f46":"#1f2937"}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:8}}>
+                  <span style={{fontSize:12,color:"#9ca3af",fontWeight:600}}>{m.label}</span>
+                  <span style={{fontSize:10,fontWeight:700,padding:"2px 7px",borderRadius:6,
+                    background:m.ev>=0.03?"#064e3b":"#1f2937",color:evCol(m.ev)}}>
+                    {evTag(m.ev)}
+                  </span>
+                </div>
+                <ProbBar prob={m.modelProb}/>
+                <div style={{display:"flex",justifyContent:"space-between",marginTop:10,fontSize:12}}>
+                  <span style={{color:"#6b7280"}}>Odds <b style={{color:"#f9fafb"}}>{m.odds.toFixed(2)}</b></span>
+                  <span style={{color:evCol(m.ev),fontWeight:700}}>EV {(m.ev*100).toFixed(1)}%</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Best bet */}
+          {result.bestBet?(
+            <div style={{marginTop:14,background:"#064e3b",borderRadius:10,padding:"14px 18px",
+              display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{fontSize:11,color:"#6ee7b7",marginBottom:3}}>🏆 HIGHEST VALUE BET</div>
+                <div style={{fontSize:15,fontWeight:700}}>
+                  {fixture.home_team} vs {fixture.away_team} — {result.bestBet.label}
+                </div>
+              </div>
+              <div style={{textAlign:"right"}}>
+                <div style={{fontSize:22,fontWeight:800,color:"#00e676"}}>
+                  +{(result.bestBet.ev*100).toFixed(1)}% EV
+                </div>
+                <div style={{fontSize:12,color:"#6ee7b7"}}>@ {result.bestBet.odds.toFixed(2)}</div>
+              </div>
+            </div>
+          ):(
+            <div style={{marginTop:14,background:"#1a0000",borderRadius:10,padding:"12px 16px",
+              color:"#ef5350",fontSize:13}}>
+              No value found — bookmaker prices are efficient for this match.
+            </div>
+          )}
+        </div>
+      )}
+      {result?.error&&(
+        <div style={{color:"#ef5350",fontSize:13,marginTop:12}}>Error: {result.error}</div>
+      )}
+    </div>
+  );
+}
+
+// ── API Key Screen ─────────────────────────────────────────
+function ApiKeyScreen({onSave}){
+  const [key,setKey]=useState("");
+  return(
+    <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{background:"#111827",borderRadius:20,padding:40,maxWidth:440,width:"100%",
+        border:"1px solid #1f2937",textAlign:"center"}}>
+        <div style={{fontSize:40,marginBottom:16}}>⚽</div>
+        <div style={{fontSize:24,fontWeight:800,marginBottom:8}}>Football Edge</div>
+        <div style={{fontSize:14,color:"#6b7280",marginBottom:28}}>
+          Enter your Odds API key to load today's fixtures
+        </div>
+        <input
+          value={key} onChange={e=>setKey(e.target.value)}
+          placeholder="Paste your Odds API key here"
+          style={{width:"100%",background:"#0d1117",border:"1px solid #374151",borderRadius:10,
+            padding:"12px 16px",color:"#f9fafb",fontSize:14,marginBottom:14,outline:"none"}}
+        />
+        <button onClick={()=>key.trim()&&onSave(key.trim())} style={{
+          width:"100%",background:"linear-gradient(135deg,#6366f1,#8b5cf6)",
+          color:"#fff",border:"none",borderRadius:10,padding:"13px",fontSize:15,fontWeight:700,cursor:"pointer"
+        }}>
+          Load Fixtures →
+        </button>
+        <div style={{fontSize:11,color:"#374151",marginTop:16}}>
+          Get a free key at the-odds-api.com
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ──────────────────────────────────────────────
+function App(){
+  const [apiKey,setApiKey]=useState(()=>localStorage.getItem("odds_api_key")||"");
+  const [fixtures,setFixtures]=useState([]);
+  const [results,setResults]=useState({});
+  const [loading,setLoading]=useState(false);
+  const [error,setError]=useState(null);
+  const [filter,setFilter]=useState("all");
+
+  function saveKey(k){
+    localStorage.setItem("odds_api_key",k);
+    setApiKey(k);
+  }
+
+  useEffect(()=>{
+    if(!apiKey)return;
+    (async()=>{
+      try{
+        setLoading(true);setError(null);
+        const url=`https://api.the-odds-api.com/v4/sports/${SPORT}/odds/?apiKey=${apiKey}&regions=uk&markets=h2h,totals&oddsFormat=decimal`;
+        const res=await fetch(url);
+        if(!res.ok)throw new Error(`API error ${res.status} — check your key`);
+        const data=await res.json();
+        const parsed=data.map(ev=>{
+          const avg=(mkt,name,pt)=>{
+            const vals=ev.bookmakers?.flatMap(b=>b.markets?.filter(m=>m.key===mkt)
+              .flatMap(m=>m.outcomes?.filter(o=>o.name===name&&(pt==null||Math.abs((o.point||0)-pt)<.01))
+              .map(o=>o.price)??[])??[])??[];
+            return vals.length?vals.reduce((a,b)=>a+b,0)/vals.length:null;
+          };
+          return{
+            id:ev.id,home_team:ev.home_team,away_team:ev.away_team,
+            commence_time:ev.commence_time,
+            odds:{home:avg("h2h",ev.home_team),draw:avg("h2h","Draw"),away:avg("h2h",ev.away_team),
+              over25:avg("totals","Over",2.5),under25:avg("totals","Under",2.5)}
+          };
+        }).filter(f=>f.odds.home&&f.odds.draw&&f.odds.away)
+          .sort((a,b)=>new Date(a.commence_time)-new Date(b.commence_time));
+        setFixtures(parsed);
+      }catch(e){setError(e.message);}
+      finally{setLoading(false);}
+    })();
+  },[apiKey]);
+
+  const analyse=useCallback(async(fixture)=>{
+    setResults(p=>({...p,[fixture.id]:{loading:true}}));
+    try{
+      const{lambdaHome,lambdaAway}=deriveLambdas(fixture.odds.home,fixture.odds.draw,fixture.odds.away);
+      const M=buildMatrix(lambdaHome,lambdaAway);
+      const pr=matrixProbs(M);
+      const mkts=[
+        {key:"hw",label:"Home Win",modelProb:pr.home,odds:fixture.odds.home},
+        {key:"dr",label:"Draw",modelProb:pr.draw,odds:fixture.odds.draw},
+        {key:"aw",label:"Away Win",modelProb:pr.away,odds:fixture.odds.away},
+        {key:"o25",label:"Over 2.5",modelProb:pr.over25,odds:fixture.odds.over25||1.9},
+        {key:"u25",label:"Under 2.5",modelProb:pr.under25,odds:fixture.odds.under25||1.9},
+        {key:"by",label:"BTTS Yes",modelProb:pr.bttsYes,odds:1.90},
+        {key:"bn",label:"BTTS No",modelProb:pr.bttsNo,odds:1.90},
+      ].filter(m=>m.odds).map(m=>({...m,ev:ev(m.modelProb,m.odds)}));
+      const value=mkts.filter(m=>m.ev>=0.03).sort((a,b)=>b.ev-a.ev);
+      setResults(p=>({...p,[fixture.id]:{lambdaHome,lambdaAway,markets:mkts,valueBets:value,bestBet:value[0]||null}}));
+    }catch(e){setResults(p=>({...p,[fixture.id]:{error:e.message}}));}
+  },[]);
+
+  if(!apiKey)return <ApiKeyScreen onSave={saveKey}/>;
+
+  const today=new Date().toDateString();
+  const shown=filter==="today"?fixtures.filter(f=>new Date(f.commence_time).toDateString()===today):fixtures;
+  const analysed=Object.values(results).filter(r=>r&&!r.loading&&!r.error);
+  const valueBets=analysed.flatMap(r=>r.valueBets||[]);
+
+  return(
+    <div style={{minHeight:"100vh"}}>
+      {/* Header */}
+      <div style={{background:"linear-gradient(135deg,#0f172a 0%,#1e1b4b 100%)",
+        borderBottom:"1px solid #1f2937",padding:"22px 0 20px"}}>
+        <div style={{maxWidth:920,margin:"0 auto",padding:"0 20px",
+          display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:11,color:"#6366f1",letterSpacing:2,textTransform:"uppercase",marginBottom:4}}>
+              Phase 1 · Validation Engine
+            </div>
+            <div style={{fontSize:26,fontWeight:800}}>⚽ Football Edge</div>
+            <div style={{fontSize:13,color:"#6b7280",marginTop:2}}>
+              Poisson Model · EV Engine · Premier League
+            </div>
+          </div>
+          {analysed.length>0&&(
+            <div style={{display:"flex",gap:28}}>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:26,fontWeight:800,color:"#4fc3f7"}}>{analysed.length}</div>
+                <div style={{fontSize:11,color:"#6b7280"}}>ANALYSED</div>
+              </div>
+              <div style={{textAlign:"center"}}>
+                <div style={{fontSize:26,fontWeight:800,color:"#00e676"}}>{valueBets.length}</div>
+                <div style={{fontSize:11,color:"#6b7280"}}>VALUE BETS</div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div style={{maxWidth:920,margin:"0 auto",padding:"24px 20px"}}>
+        {/* Filter */}
+        <div style={{display:"flex",gap:10,marginBottom:24}}>
+          {["all","today"].map(f=>(
+            <button key={f} onClick={()=>setFilter(f)} style={{
+              background:filter===f?"#6366f1":"#111827",color:filter===f?"#fff":"#6b7280",
+              border:"none",borderRadius:8,padding:"8px 18px",fontSize:13,fontWeight:600,
+              cursor:"pointer",textTransform:"capitalize"
+            }}>{f==="all"?"All Fixtures":"Today"}</button>
+          ))}
+          <button onClick={()=>{localStorage.removeItem("odds_api_key");setApiKey("");}} style={{
+            marginLeft:"auto",background:"transparent",color:"#374151",border:"none",
+            fontSize:12,cursor:"pointer"
+          }}>Change API Key</button>
+        </div>
+
+        {loading&&(
+          <div style={{textAlign:"center",padding:60,color:"#6b7280"}}>
+            <div style={{fontSize:40,marginBottom:16}}>⚽</div>
+            Loading fixtures and odds…
+          </div>
+        )}
+        {error&&(
+          <div style={{background:"#1f0000",border:"1px solid #7f1d1d",borderRadius:12,
+            padding:20,color:"#fca5a5"}}>
+            <b>Could not load fixtures:</b> {error}
+          </div>
+        )}
+        {!loading&&!error&&shown.length===0&&(
+          <div style={{textAlign:"center",padding:60,color:"#6b7280"}}>
+            No upcoming Premier League fixtures right now.
+          </div>
+        )}
+        {shown.map(f=>(
+          <FixtureCard key={f.id} fixture={f} onAnalyse={analyse} result={results[f.id]}/>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
